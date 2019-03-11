@@ -117,24 +117,18 @@ showable(::MIME"image/svg+xml", tp::TikzPicture) = true
 function save(f::Union{TEX,TIKZ}, tp::TikzPicture)
     filename = f.filename
     ext = extension(f)
-    tex = open("$(filename).$(ext)", "w")
-    if f.include_preamble
-        if standaloneWorkaround()
-            println(tex, "\\RequirePackage{luatex85}")
+    open("$(filename).$(ext)", "w") do io
+        if f.include_preamble
+            standaloneWorkaround() && println(io, "\\RequirePackage{luatex85}")
+            println(io, "\\documentclass[tikz]{standalone}")
+            println(io, tp.preamble)
+            println(io, "\\begin{document}")
         end
-        println(tex, "\\documentclass[tikz]{standalone}")
-        println(tex, tp.preamble)
-        println(tex, "\\begin{document}")
+        println(io, "\\begin{tikzpicture}[", tp.options, "]")
+        println(io, tp.data)
+        println(io, "\\end{tikzpicture}")
+        f.include_preamble && println(io, "\\end{document}")
     end
-    print(tex, "\\begin{tikzpicture}[")
-    print(tex, tp.options)
-    println(tex, "]")
-    println(tex, tp.data)
-    println(tex, "\\end{tikzpicture}")
-    if f.include_preamble
-        println(tex, "\\end{document}")
-    end
-    close(tex)
 end
 
 function save(f::TEX, td::TikzDocument)
@@ -142,35 +136,27 @@ function save(f::TEX, td::TikzDocument)
         error("TikzDocument does not contain pictures")
     end
     filename = f.filename
-    tex = open("$(filename).tex", "w")
-    if f.include_preamble
-        println(tex, "\\documentclass{article}")
-        println(tex, "\\usepackage{caption}")
-        println(tex, "\\usepackage{tikz}")
-        println(tex, td.pictures[1].preamble)
-        println(tex, "\\begin{document}")
+    open("$(filename).tex", "w") do io
+        if f.include_preamble
+            println(io, "\\documentclass{article}")
+            println(io, "\\usepackage{caption}")
+            println(io, "\\usepackage{tikz}")
+            println(io, td.pictures[1].preamble)
+            println(io, "\\begin{document}")
+        end
+        println(io, "\\centering")
+        @assert length(td.pictures) == length(td.captions)
+        for (tp, caption) in zip(td.pictures, td.captions)
+            println(io, "\\centering")
+            println(io, "\\begin{tikzpicture}[", tp.options, "]")
+            println(io, tp.data)
+            println(io, "\\end{tikzpicture}")
+            println(io, "\\captionof{figure}{", caption, "}")
+            println(io, "\\vspace{5ex}")
+            println(io)
+        end
+        f.include_preamble && println(io, "\\end{document}")
     end
-    println(tex, "\\centering")
-    @assert length(td.pictures) == length(td.captions)
-    i = 1
-    for tp in td.pictures
-        println(tex, "\\centering")
-        print(tex, "\\begin{tikzpicture}[")
-        print(tex, tp.options)
-        println(tex, "]")
-        println(tex, tp.data)
-        println(tex, "\\end{tikzpicture}")
-        print(tex, "\\captionof{figure}{")
-        print(tex, td.captions[i])
-        println(tex, "}")
-        println(tex, "\\vspace{5ex}")
-        println(tex)
-        i += 1
-    end
-    if f.include_preamble
-        println(tex, "\\end{document}")
-    end
-    close(tex)
 end
 
 function latexerrormsg(s)
@@ -191,28 +177,12 @@ function latexerrormsg(s)
     end
 end
 
-function _mktempdir(foldername)
-    temp_dir = mktempdir(foldername)
-    if Sys.iswindows()
-        # this seems to be needed for Windows
-        mod_temp_dir = replace(temp_dir, r"(_|\.|\\)" => "")
-        mv(temp_dir, mod_temp_dir)
-        temp_dir = mod_temp_dir
-    end
-    return temp_dir
-end
-
-
 function save(f::PDF, tp::TikzPicture)
-
-    # Isolate basename and foldername of file
     basefilename = basename(f.filename)
-    working_dir = dirname(abspath(f.filename))
+    dest = abspath(f.filename * ".pdf")
 
-    # Call anonymous function to do task and automatically return
-    cd(working_dir) do
-        temp_dir = _mktempdir("./")
-        temp_filename = joinpath(temp_dir,basefilename)
+    cd_temp() do
+        temp_filename = basefilename
 
         # Save the TEX file in tmp dir
         save(TEX(temp_filename * ".tex"), tp)
@@ -220,9 +190,9 @@ function save(f::PDF, tp::TikzPicture)
         # From the .tex file, generate a pdf within the tmp folder
         latexCommand = ``
         if tp.enableWrite18
-            latexCommand = `$(tikzCommand()) --enable-write18 --output-directory=$(temp_dir) $(temp_filename*".tex")`
+            latexCommand = `$(tikzCommand()) --enable-write18 $(temp_filename*".tex")`
         else
-            latexCommand = `$(tikzCommand()) --output-directory=$(temp_dir) $(temp_filename*".tex")`
+            latexCommand = `$(tikzCommand()) $(temp_filename*".tex")`
         end
 
         latexSuccess = success(latexCommand)
@@ -231,7 +201,7 @@ function save(f::PDF, tp::TikzPicture)
         try
             tex_log = read(temp_filename * ".log", String)
         catch
-            tex_log = read(joinpath(temp_dir,"texput.log"), String)
+            tex_log = read("texput.log", String)
         end
 
         if occursin("LaTeX Warning: Label(s)", tex_log)
@@ -240,27 +210,14 @@ function save(f::PDF, tp::TikzPicture)
 
         # Move PDF out of tmpdir regardless
         # Give warning if PDF file already exists
-        if isfile("$(basefilename).pdf")
-            @warn "$(basefilename).pdf already exists, overwriting!"
-        end
         if latexSuccess
-            mv("$(temp_filename).pdf", "$(basefilename).pdf",force=true)
-        end
-
-        try
-            # Shouldn't need to be try-catched anymore, but best to be safe
-            # This failing is NOT critical either, so just make it a warning
-            if tikzDeleteIntermediate()
-                # Delete tmp dir
-                rm(temp_dir, recursive=true)
-            end
-        catch
-            @warn "TikzPictures: Your intermediate files are not being deleted."
+            _mv("$(temp_filename).pdf", dest)
         end
 
         if !latexSuccess
             # Remove failed attempt.
             if !standaloneWorkaround() && occursin("\\sa@placebox ->\\newpage \\global \\pdfpagewidth", tex_log)
+                @info "Enabling standalone workaround."
                 standaloneWorkaround(true)
                 save(f, tp)
                 return
@@ -271,42 +228,23 @@ function save(f::PDF, tp::TikzPicture)
     end
 end
 
-
 function save(f::PDF, td::TikzDocument)
-    # Isolate basename and foldername of file
     basefilename = basename(f.filename)
-    working_dir = dirname(abspath(f.filename))
+    dest = abspath(f.filename * ".pdf")
 
-    # Call anonymous function to do task and automatically return
-    cd(working_dir) do
-        # Create tmp dir in working directory
-        temp_dir = _mktempdir("./")
-        temp_filename = joinpath(temp_dir,basefilename)
+    cd_temp() do
+        temp_filename = basefilename
 
         try
             save(TEX(temp_filename * ".tex"), td)
             if td.pictures[1].enableWrite18
-                success(`$(tikzCommand()) --enable-write18 --output-directory=$(temp_dir) $(temp_filename)`)
+                success(`$(tikzCommand()) --enable-write18 $(temp_filename)`)
             else
-                success(`$(tikzCommand()) --output-directory=$(temp_dir) $(temp_filename)`)
+                success(`$(tikzCommand()) $(temp_filename)`)
             end
 
             # Move PDF out of tmpdir regardless
-            if isfile("$(basefilename).pdf")
-                @warn "$(basefilename).pdf already exists, overwriting!"
-            end
-            mv("$(temp_filename).pdf", "$(basefilename).pdf",force=true)
-
-            try
-                # Shouldn't need to be try-catched anymore, but best to be safe
-                # This failing is NOT critical either, so just make it a warning
-                if tikzDeleteIntermediate()
-                    # Delete tmp dir
-                    rm(temp_dir, recursive=true)
-                end
-            catch
-                @warn "TikzPictures: Your intermediate files are not being deleted."
-            end
+            _mv("$(temp_filename).pdf", dest)
         catch
             @warn "Error saving as PDF."
             rethrow()
@@ -316,28 +254,22 @@ end
 
 
 function save(f::SVG, tp::TikzPicture)
-
     basefilename = basename(f.filename)
-    working_dir = dirname(abspath(f.filename))
+    dest = abspath(f.filename * ".svg")
 
-    # Call anonymous function to do task and automatically return
-    cd(working_dir) do
-        # Create tmp dir in working directory
-        temp_dir = _mktempdir("./")
-        temp_filename = joinpath(temp_dir,basefilename)
+    cd_temp() do
+        temp_filename = basefilename
 
         # Save the TEX file in tmp dir
         save(TEX(temp_filename * ".tex"), tp)
 
-
         if tikzUsePDF2SVG()
-
             # Convert to PDF and then to SVG
             latexCommand = ``
             if tp.enableWrite18
-                latexCommand = `$(tikzCommand()) --enable-write18 --output-directory=$(temp_dir) $(temp_filename*".tex")`
+                latexCommand = `$(tikzCommand()) --enable-write18 $(temp_filename*".tex")`
             else
-                latexCommand = `$(tikzCommand()) --output-directory=$(temp_dir) $(temp_filename*".tex")`
+                latexCommand = `$(tikzCommand()) $(temp_filename*".tex")`
             end
 
             latexSuccess = success(latexCommand)
@@ -351,6 +283,7 @@ function save(f::SVG, tp::TikzPicture)
             if !latexSuccess
             # Remove failed attempt.
                 if !standaloneWorkaround() && occursin("\\sa@placebox ->\\newpage \\global \\pdfpagewidth", tex_log)
+                    @info "Enabling standalone workaround."
                     standaloneWorkaround(true)
                     save(f, tp)
                     return
@@ -365,38 +298,19 @@ function save(f::SVG, tp::TikzPicture)
         else
             luaSucc = false
             if tp.enableWrite18
-                luaSucc = success(`$(tikzCommand()) --enable-write18 --output-format=dvi --output-directory=$(temp_dir) $(temp_filename*".tex")`)
+                luaSucc = success(`$(tikzCommand()) --enable-write18 --output-format=dvi $(temp_filename*".tex")`)
             else
-                luaSucc = success(`$(tikzCommand()) --output-format=dvi --output-directory=$(temp_dir) $(temp_filename*".tex")`)
+                luaSucc = success(`$(tikzCommand()) --output-format=dvi $(temp_filename*".tex")`)
             end
             dviSuccess = success(`dvisvgm --no-fonts $(temp_filename*".dvi")`)
 
             # Commands fail silently so check if SVG exists and throw error with warning if not
             if !luaSucc || !dviSuccess
-                if tikzDeleteIntermediate()
-                    # Delete tmp dir
-                    rm(temp_dir, recursive=true)
-                end
                 error("Direct output to SVG failed! Please consider using PDF2SVG")
             end
         end
 
-        # Move SVG out of tmpdir into working dir and give warning if overwriting
-        if isfile("$(basefilename).svg")
-            @warn "$(basefilename).svg already exists, overwriting!"
-        end
-        mv("$(temp_filename).svg", "$(basefilename).svg",force=true)
-
-        try
-            # Shouldn't need to be try-catched anymore, but best to be safe
-            # This failing is NOT critical either, so just make it a warning
-            if tikzDeleteIntermediate()
-                # Delete tmp dir
-                rm(temp_dir, recursive=true)
-            end
-        catch
-            @warn "TikzPictures: Your intermediate files are not being deleted."
-        end
+        _mv("$(temp_filename).svg", dest)
     end
 end
 
@@ -406,22 +320,47 @@ global _tikzid = round(UInt64, time() * 1e6)
 
 function Base.show(f::IO, ::MIME"image/svg+xml", tp::TikzPicture)
     global _tikzid
-    filename = "tikzpicture"
-    save(SVG(filename), tp)
-    s = read("$filename.svg", String)
-    s = replace(s, "glyph" => "glyph-$(_tikzid)-")
-    s = replace(s, "\"clip" => "\"clip-$(_tikzid)-")
-    s = replace(s, "#clip" => "#clip-$(_tikzid)-")
-    s = replace(s, "\"image" => "\"image-$(_tikzid)-")
-    s = replace(s, "#image" => "#image-$(_tikzid)-")
-    s = replace(s, "linearGradient id=\"linear" => "linearGradient id=\"linear-$(_tikzid)-")
-    s = replace(s, "#linear" => "#linear-$(_tikzid)-")
-    s = replace(s, "image id=\"" => "image style=\"image-rendering: pixelated;\" id=\"")
-    _tikzid += 1
-    println(f, s)
-    if tikzDeleteIntermediate()
-        rm("$filename.svg")
+    filename = tempname()
+    try
+        save(SVG(filename), tp)
+        s = read("$filename.svg", String)
+        s = replace(s, "glyph" => "glyph-$(_tikzid)-")
+        s = replace(s, "\"clip" => "\"clip-$(_tikzid)-")
+        s = replace(s, "#clip" => "#clip-$(_tikzid)-")
+        s = replace(s, "\"image" => "\"image-$(_tikzid)-")
+        s = replace(s, "#image" => "#image-$(_tikzid)-")
+        s = replace(s, "linearGradient id=\"linear" => "linearGradient id=\"linear-$(_tikzid)-")
+        s = replace(s, "#linear" => "#linear-$(_tikzid)-")
+        s = replace(s, "image id=\"" => "image style=\"image-rendering: pixelated;\" id=\"")
+        _tikzid += 1
+        println(f, s)
+    finally
+        if tikzDeleteIntermediate()
+            rm("$filename.svg")
+        end
     end
+end
+
+function cd_temp(fn::Function, parent=tempdir())
+    tmpdir = mktempdir(parent)
+    try
+        cd(fn, tmpdir)
+    finally
+        if (tikzDeleteIntermediate())
+            try
+                rm(tmpdir, recursive=true)
+            catch ex
+                @error "TikzPictures: Your intermediate files are not being deleted. ($(tmpdir))" _group=:file exception=(ex, catch_backtrace())
+            end
+        end
+    end
+end
+
+function _mv(source, dest; warn=true)
+    if(warn && isfile(dest))
+        @warn "File $(dest) already exists, overwriting!"
+    end
+    mv(source, dest, force=true)
 end
 
 end # module
